@@ -47,7 +47,7 @@ class CatchGame(object):
         self.paddle_x = self.GAME_WIDTH // 2
         self.game_score = 0
         self.reward = 0
-        self.ball_x = random.randint(0, self.GAME_WIDTH)
+        self.ball_x = random.randint(0, self.GAME_WIDTH-40)
         self.ball_y = self.GAME_CEILING
         self.num_tries = 0
         # set up display, clock, etc

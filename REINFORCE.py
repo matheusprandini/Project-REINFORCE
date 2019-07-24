@@ -1,50 +1,31 @@
-from __future__ import division, print_function
-from keras.models import *
-from keras.layers.core import Activation, Dense, Flatten, Reshape
-from keras.layers.convolutional import Conv2D
-from keras.optimizers import Adam
-from scipy.misc import imresize
-import collections
 import numpy as np
-import os
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from scipy.misc import imresize
+from Model import ModelCatchGame
 
 IMAGE_SIZE = 84
 LEARNING_RATE = 1e-3
-NUM_EPOCHS = 1
+GAMMA = 0.9 # discount factor
+INPUT_SIZE = IMAGE_SIZE ** 2
+NUM_ACTIONS = 3
+EPISODES_TO_TRAIN = 16
 
-class ReinforceAgent:
+class ReinforceAgent():
+  
+    def __init__(self, env, model):
+        self.env = env
+        self.model = self.build_model(model)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=LEARNING_RATE)
 
-    def __init__(self, num_actions):
-        self.model = self.build_model(num_actions)
+    def build_model(self, model):
+        if model == "Catch":
+            return ModelCatchGame(INPUT_SIZE, NUM_ACTIONS)
+        return None
 
-    # build the model
-    def build_model(self, num_actions):
-	
-		# Sequential Model
-        model = Sequential()
-
-        # 1st mlp layer
-        model.add(Dense(512, kernel_initializer="normal", input_shape=(IMAGE_SIZE**2,)))
-        model.add(Activation("relu"))
-		
-		# 2st mlp layer
-        model.add(Dense(128, kernel_initializer="normal"))
-        model.add(Activation("relu"))
-		
-		# 3st (last) cnn layer -> Classification layer
-        model.add(Dense(num_actions, kernel_initializer="normal"))
-        model.add(Activation("softmax"))
-
-		
-		# Compiling Model
-        model.compile(optimizer=Adam(lr=LEARNING_RATE), loss="categorical_crossentropy")
-
-		# Show model details
-        model.summary()
-		
-        return model
-
-    # Preprocess original image (400,400) to (84,84)
+    # Preprocessing original image (400,400) to (84,84)
     def preprocess_image(self, image):
         
         # single image
@@ -55,26 +36,111 @@ class ReinforceAgent:
 
         x_t = np.expand_dims(x_t, axis=0)
 
-        return np.reshape(x_t, (1, IMAGE_SIZE*IMAGE_SIZE*1))
-
-    # Pick action stochastically
+        return np.reshape(x_t, (1, IMAGE_SIZE*IMAGE_SIZE*1)).squeeze()
+        
+    def calc_qvals(self, rewards):
+        res = []
+        sum_r = 0.0
+        for r in reversed(rewards):
+            sum_r *= GAMMA
+            sum_r += r
+            res.append(sum_r)
+        return list(reversed(res))
+        
+    # Picking an action stochastically
     def get_action(self, state):
-        print(state.shape)
-        self.model.predict(state)
-        #print(action_probabilities)
-        return 0
+        state = torch.tensor(state, dtype=torch.float32)
+        logits = self.model(state)
+        actions_probabilities = F.softmax(logits).cpu().detach().numpy().squeeze()
+        action = np.random.choice(NUM_ACTIONS, 1, p=actions_probabilities)[0]
 
-    def train(self, environment):
+        return action
+      
+    def generate_experience(self):
+        experience = self.execute_one_episode()
+        steps = 0
+        states = []
+        actions = []
+        rewards = []
+        
+        for exp in experience:
+            states.append(exp[0])
+            actions.append(int(exp[1]))
+            rewards.append(exp[2])
+            steps += 1
+          
+        return [states, actions, rewards], steps
+        
+    def execute_one_episode(self):
+        self.env.reset()
+        state = self.env.get_current_frame()
+        game_over = False
+        experiences = []
+        
+        while not game_over:
+            state = self.preprocess_image(state)
+            action = self.get_action(state)
+            new_state, reward, game_over = self.env.step(action)
+            if game_over:
+                new_state = None
+            experience = tuple([state, action, reward])
+            experiences.append(experience)
+            state = new_state
+            
+        return experiences
+        
+    def train(self):
+      
+        total_rewards = []
+        step_idx = 0
+        done_episodes = 0
 
-        for e in range(NUM_EPOCHS):
-            print("Epoch: {:d}".format(e))
-            environment.reset()
-            game_over = False
+        batch_episodes = 0
+        batch_states, batch_actions, batch_qvals = [], [], []
+        cur_rewards = []
 
-            input_t = environment.get_current_frame()
-            input_t = self.preprocess_image(input_t)
+        while True:
+            
+            # Generates a new episode
+            exp_source, num_steps = self.generate_experience()
+            
+            batch_states.extend(exp_source[0])
+            batch_actions.extend(exp_source[1])
+            cur_rewards.extend(exp_source[2])
+            step_idx += num_steps
 
-            while not game_over:
-                action = self.get_action(input_t)
-                input_tp1, reward, game_over = environment.step(action)
-                print(action, reward, game_over)
+            batch_qvals.extend(self.calc_qvals(cur_rewards))
+            batch_episodes += 1
+                
+            reward = np.sum(cur_rewards)
+            cur_rewards.clear()
+
+            done_episodes += 1
+            total_rewards.append(reward)
+            mean_rewards = float(np.mean(total_rewards[-100:]))
+            print("%d: reward: %6.2f, mean_100: %6.2f, episodes: %d" % (
+                step_idx, reward, mean_rewards, done_episodes))
+            if mean_rewards > 0.9:
+                print("Solved in %d steps and %d episodes!" % (step_idx, done_episodes))
+                break
+                
+            if batch_episodes < EPISODES_TO_TRAIN:
+                continue
+
+            self.optimizer.zero_grad()
+            states_v = torch.FloatTensor(batch_states)
+            batch_actions_t = torch.LongTensor(batch_actions)
+            batch_qvals_v = torch.FloatTensor(batch_qvals)
+            print(states_v.shape)
+            logits_v = self.model(states_v)
+            log_prob_v = F.log_softmax(logits_v, dim=1)
+            log_prob_actions_v = batch_qvals_v * log_prob_v[range(len(batch_states)), batch_actions_t]
+            loss_v = -log_prob_actions_v.mean()
+
+            loss_v.backward()
+            self.optimizer.step()
+
+            batch_episodes = 0
+            batch_states.clear()
+            batch_actions.clear()
+            batch_qvals.clear()
