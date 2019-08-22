@@ -4,29 +4,32 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from scipy.misc import imresize
-from Model import ModelCatchGame
+from Model import ModelCatchGame, ModelSnakeGame
 
 IMAGE_SIZE = 84
 LEARNING_RATE = 1e-3
 GAMMA = 0.9 # discount factor
 INPUT_SIZE = IMAGE_SIZE ** 2
-NUM_ACTIONS = 3
-EPISODES_TO_TRAIN = 16
+EPISODES_TO_TRAIN = 32
 
 class ReinforceAgent():
   
-    def __init__(self, env, model):
+    def __init__(self, env, model, num_actions):
         self.env = env
-        self.model = self.build_model(model)
+        self.name_model = model
+        self.num_actions = num_actions
+        self.model = self.build_model()
         self.optimizer = optim.Adam(self.model.parameters(), lr=LEARNING_RATE)
 
-    def build_model(self, model):
-        if model == "Catch":
-            return ModelCatchGame(INPUT_SIZE, NUM_ACTIONS)
+    def build_model(self):
+        if self.name_model == "Catch":
+            return ModelCatchGame(INPUT_SIZE, self.num_actions)
+        if self.name_model == "Snake":
+            return ModelSnakeGame(self.num_actions)
         return None
 
     # Preprocessing original image (400,400) to (84,84)
-    def preprocess_image(self, image):
+    def preprocess_image_catch(self, image):
         
         # single image
         x_t = image
@@ -37,6 +40,20 @@ class ReinforceAgent():
         x_t = np.expand_dims(x_t, axis=0)
 
         return np.reshape(x_t, (1, IMAGE_SIZE*IMAGE_SIZE*1)).squeeze()
+
+    # Preprocessing original image to (84,84,3)
+    def preprocess_image_snake(self, image):
+        
+        # single image
+        x_t = image
+        x_t = imresize(x_t, (IMAGE_SIZE, IMAGE_SIZE, 3)) 
+        x_t = np.transpose(x_t,(2,0,1))
+        x_t = x_t.astype("float")
+        x_t /= 255.0
+
+        x_t = np.expand_dims(x_t, axis=0)
+
+        return x_t
         
     def calc_qvals(self, rewards):
         res = []
@@ -52,7 +69,7 @@ class ReinforceAgent():
         state = torch.tensor(state, dtype=torch.float32)
         logits = self.model(state)
         actions_probabilities = F.softmax(logits).cpu().detach().numpy().squeeze()
-        action = np.random.choice(NUM_ACTIONS, 1, p=actions_probabilities)[0]
+        action = np.random.choice(self.num_actions, 1, p=actions_probabilities)[0]
 
         return action
       
@@ -78,7 +95,10 @@ class ReinforceAgent():
         experiences = []
         
         while not game_over:
-            state = self.preprocess_image(state)
+            if self.name_model == 'Catch':
+                state = self.preprocess_image_catch(state)
+            if self.name_model == 'Snake':
+                state = self.preprocess_image_snake(state)
             action = self.get_action(state)
             new_state, reward, game_over = self.env.step(action)
             if game_over:
@@ -128,7 +148,7 @@ class ReinforceAgent():
                 continue
 
             self.optimizer.zero_grad()
-            states_v = torch.FloatTensor(batch_states)
+            states_v = torch.FloatTensor(batch_states).squeeze()
             batch_actions_t = torch.LongTensor(batch_actions)
             batch_qvals_v = torch.FloatTensor(batch_qvals)
             print(states_v.shape)
